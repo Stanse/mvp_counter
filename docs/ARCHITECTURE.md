@@ -8,21 +8,26 @@ graph as actually built, which differs slightly from the spec's own module table
 
 ```
 Camera/video/trace frame
-    -> PoseDetector.detect()        (:pose:mediapipe | :pose:movenet)
+    -> PoseDetector.detect()        (:pose:mediapipe | :pose:movenet)   [not wired up until M4]
     -> PoseFrame
-    -> PoseNormalizer                (:signals)
+    -> PoseNormalizer                (:signals - scale by torso length, hold missing landmarks)
     -> SignalExtractor                (:signals, via LandmarkSchema)
     -> SignalFrame (irregular dt)
-    -> Resampler -> FilterBank        (:core:dsp, fixed 50 Hz grid)
-    -> ExerciseAnalyzer.process()    (:analysis:jumprope | :analysis:strength)
+    -> Resampler                      (:core:dsp, fixed 50 Hz grid - pivoted per-signal by
+                                       :tools:replay's SignalResampling, see docs/DECISIONS.md)
+    -> ExerciseAnalyzer.process()    (:analysis:jumprope | :analysis:strength - each owns its
+                                       own detrend/bandpass, no separate FilterBank stage)
     -> AnalyzerEvent
-    -> SessionAggregator              (:data / :feature:workout)
+    -> SessionAggregator              (:data / :feature:workout)   [not built until M5]
     -> UI + Room + tone
 ```
 
 `ExerciseAnalyzer` implementations never see a `Landmark` or a `FrameImage` - only
 `SignalFrame`s in, `AnalyzerEvent`s out. That boundary is what makes the DSP and analysis layers
-plain-JVM-testable without a camera, a model, or an emulator.
+plain-JVM-testable without a camera, a model, or an emulator. `:tools:replay`'s `ReplayPipeline`
+(main sources) wires `PoseFrame -> ... -> AnalyzerEvent` end to end over an already-collected
+`List<PoseFrame>` - the same shape a live, `Flow`-based capture pipeline will drive in M4/M5, but
+synchronous since a trace has no camera clock to keep up with.
 
 ## Module graph
 
@@ -38,23 +43,29 @@ plain-JVM-testable without a camera, a model, or an emulator.
 :pose:mediapipe  [Android]     MediaPipe Tasks Vision impl -> :pose:api, :core:model
 :pose:movenet    [Android]     TFLite MoveNet impl -> :pose:api, :core:model
 
-:signals      [pure Kotlin] PoseNormalizer, SignalExtractor -> :core:model, :core:dsp
+:signals      [pure Kotlin] ScaleOnlyPoseNormalizer, SignalExtractor (M3, implemented) ->
+                             :core:model, :core:dsp
 
-:analysis:api        [pure Kotlin] ExerciseAnalyzer/Descriptor/Registry -> :core:model
-:analysis:jumprope   [pure Kotlin] -> :analysis:api, :core:model, :core:dsp
-:analysis:strength   [pure Kotlin] -> :analysis:api, :core:model
+:analysis:api        [pure Kotlin] ExerciseAnalyzer/Descriptor/Factory, Gate, ThresholdAnalyzer
+                                    (the declarative FSM archetype itself - see
+                                    docs/DECISIONS.md) -> :core:model
+:analysis:jumprope   [pure Kotlin] JumpRopeAnalyzer, CrossCorrelationTechniqueClassifier
+                                    (M3, implemented) -> :analysis:api, :core:model, :core:dsp
+:analysis:strength   [pure Kotlin] StrengthExercises (squat/pushup ThresholdAnalyzerConfigs,
+                                    M3, implemented) -> :analysis:api, :core:model
 
-:capture      [pure Kotlin] FrameSource, TraceFrameSource -> :core:model
-              (CameraFrameSource/VideoFileFrameSource, which need CameraX/MediaCodec, live in
-              :app - see docs/DECISIONS.md)
+:capture      [pure Kotlin] FrameSource (for CameraFrameSource/VideoFileFrameSource, which need
+              CameraX/MediaCodec and live in :app), PoseFrameSource + TraceFrameSource + the
+              .jsonl.gz trace format (M3, implemented) -> :core:model
 
 :data             [Android] Room, repositories, TraceRecorder -> :core:model
 :feature:workout  [Android] Compose screens, skeleton overlay, ViewModel
                              -> :core:model, :analysis:api, :capture, :data
 
-:tools:replay [pure Kotlin, application] CLI corpus runner
-              -> :core:model, :core:dsp, :signals, :analysis:api, :analysis:jumprope,
-                 :analysis:strength, :capture
+:tools:replay [pure Kotlin, application] ReplayPipeline, SignalResampling, CorpusRunner +
+              CorpusMetrics (precision/recall/F1 via +/-150ms window matching, spec §10), CLI
+              corpus runner printing CSV (M3, implemented) -> :core:model, :core:dsp, :signals,
+              :analysis:api, :analysis:jumprope, :analysis:strength, :capture
 
 :app  [Android application] DI graph, navigation, CameraFrameSource, wires everything together
 ```

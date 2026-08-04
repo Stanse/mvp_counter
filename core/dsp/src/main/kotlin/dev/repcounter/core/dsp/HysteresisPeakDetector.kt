@@ -14,13 +14,24 @@ import kotlin.math.sqrt
 class HysteresisPeakDetector(
     sampleRateHz: Float,
     private val kThreshold: Float = DEFAULT_K_THRESHOLD,
-    private val minRefractoryMs: Long = DEFAULT_MIN_REFRACTORY_MS,
+    minRefractoryMs: Long = DEFAULT_MIN_REFRACTORY_MS,
     rmsWindowMs: Long = DEFAULT_RMS_WINDOW_MS,
 ) : PeakDetector {
     init {
         require(sampleRateHz > 0f) { "sampleRateHz must be positive, was $sampleRateHz" }
         require(kThreshold > 0f) { "kThreshold must be positive, was $kThreshold" }
     }
+
+    /**
+     * Mutable so a caller like `JumpRopeAnalyzer` can re-derive it from a live
+     * [CadenceEstimator] (spec §8.1 step 3: `refractory = 0.6 / f0`) without losing this
+     * detector's RMS-window state, which reconstructing a new instance would.
+     */
+    var minRefractoryMs: Long = minRefractoryMs
+        set(value) {
+            require(value >= 0L) { "minRefractoryMs must not be negative, was $value" }
+            field = value
+        }
 
     private val window =
         FloatRingBuffer((rmsWindowMs / MILLIS_PER_SECOND * sampleRateHz).roundToInt().coerceAtLeast(1))

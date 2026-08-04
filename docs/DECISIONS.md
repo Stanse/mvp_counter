@@ -201,3 +201,143 @@ of exactly half the signal's period is mathematically indistinguishable from a s
 half the period - both describe the same alternating relationship. `NormalizedCrossCorrelatorTest`
 asserts on `abs(lagMs)` for that case rather than a signed value; `TechniqueClassifier` in M3
 should do the same (classify `ALTERNATING` on `|lag| ≈ T/2`, not a specific sign).
+
+## M3 — Signals and analyzers
+
+### `PoseNormalizer` doesn't translate the hip to `(0, 0)`, only scales by torso length
+
+§7's pipeline diagram says "центр таза → 0, масштаб по длине торса". Implemented as
+scale-only: `ScaleOnlyPoseNormalizer` divides every landmark coordinate by torso length but
+never subtracts the hip center. Translating every frame to its *own* hip center would make
+`HIP_Y` identically zero on every frame (each frame's hip minus itself), which destroys the
+exact oscillation §8.1's `JumpRopeAnalyzer` needs to detrend and count. §8.1's own worked
+formula - `HIP_Y` "среднее по бёдрам, нормализовано на длину торса" - only mentions scale, which
+is the tell that §7's diagram is a slight simplification, not a literal spec. Translation also
+isn't needed for any declared `SignalId`: every angle (`KNEE_ANGLE_*`, `ELBOW_ANGLE_*`,
+`TORSO_TILT`) is translation-invariant on its own. Missing/low-visibility landmarks
+(`visibility < 0.5`, placeholder threshold) hold their last known-good raw position rather than
+being zeroed or interpolated - simplest option to reason about and test, per §0's tie-break rule.
+
+### `TORSO_TILT` is degrees from horizontal, not from vertical
+
+`0°` = lying flat, `90°` = standing upright. Chosen to match §8.2's own pushup example,
+`Gate.TorsoHorizontal(maxTiltDeg = 35f)`: a pushup's torso is *supposed* to read near `0°`
+(mostly horizontal, some sag/pike tolerated up to 35°) and a standing arm-bend should read near
+`90°` and fail the gate. Tilt-from-*vertical* would invert that relationship and make the gate's
+own name backwards.
+
+### `ThresholdAnalyzer` and `Gate` live in `:analysis:api`, not `:analysis:strength`
+
+§4 calls `ThresholdAnalyzer` one of two reusable *archetypes* (the other being the periodic one
+`JumpRopeAnalyzer` implements directly - see below), and §8.2's whole point is that a new
+exercise of this shape is "one config, zero code." Putting the FSM itself in `:analysis:api`
+alongside `ExerciseAnalyzer`/`ExerciseDescriptor` is what makes `:analysis:strength`'s
+contribution *actually* just a config list (`StrengthExercises.kt`) - if the FSM lived in
+`:analysis:strength`, `:analysis:api` would have declared an archetype it doesn't provide.
+
+### No `PeriodicAnalyzer` archetype extraction yet - `JumpRopeAnalyzer` implements `ExerciseAnalyzer` directly
+
+§4 names `PeriodicAnalyzer` as the second archetype (fast cyclic exercises). M3 only has one
+periodic exercise to generalize from; extracting a shared base now would be guessing its shape
+from a single example. Deferred to M6, when jumping jacks (the spec's own extensibility proof)
+either reuses this machinery directly or reveals what's actually common between two periodic
+exercises - premature abstraction from n=1 tends to guess wrong.
+
+### `JumpRopeAnalyzer` composes `:core:dsp` directly instead of a shared `FilterBank` stage
+
+§7's diagram puts a `FilterBank` (Butterworth bandpass + One-Euro) between `Resampler` and
+`ExerciseAnalyzer`, but §6 doesn't define a `FilterBank` contract, and §8.1 assigns this specific
+exercise its own bandpass parameters (`0.8-6 Hz`, not §7's generic `0.7-6 Hz`). `JumpRopeAnalyzer`
+owns a `ButterworthBandpassFilter`, `AutocorrelationCadenceEstimator` and `HysteresisPeakDetector`
+internally rather than assuming a pipeline stage already filtered its input. Consequence: it
+expects `SignalFrame`s already on a fixed-rate grid (post-`Resampler`) but does its own signal
+conditioning from there - documented on the class itself.
+
+### `HysteresisPeakDetector.minRefractoryMs` became a mutable `var`
+
+§8.1 step 3 wants the refractory period re-derived from the live cadence estimate every update
+(`0.6 / f0`), but `:core:dsp` (M2) shipped it as a constructor-only `val`, and `:core:dsp` itself
+was deliberately kept ignorant of cadence (see the M2 entry above). Rather than reconstruct a new
+detector on every cadence update - which would throw away its RMS-window state - `minRefractoryMs`
+became a mutable property `JumpRopeAnalyzer` writes to after each `CadenceEstimator.update()`.
+This is exactly the "caller computes it, `:core:dsp` just accepts it" split the M2 KDoc already
+promised, just made concrete now that there's a caller.
+
+### Activity gate: "3 valid cycles" = 4 peaks, 3 measured periods
+
+§8.1 step 4: counting doesn't start until "3 подряд валидных цикла со стабильным периодом", then
+those 3 cycles backfill. A cycle's *period* needs two peaks to measure, so 3 period measurements
+need 4 consecutive peaks (`p0..p3`, periods `p1-p0`, `p2-p1`, `p3-p2`). `p0` only marks where the
+first measured period starts - it has no period of its own - so the 3 *backfilled* reps are
+`p1, p2, p3`, and the peak stream continues normally (one rep per peak) from `p4` on. This is a
+judgment call on a genuinely ambiguous count (§0's tie-break: picked the reading that's an exact,
+testable number rather than an approximate one) - `JumpRopeAnalyzerTest` pins down the resulting
+contiguous-index, batch-backfill behavior directly.
+
+### `MIN_CYCLE_AMPLITUDE` / `MIN_ACTIVE_AMPLITUDE`: placeholder absolute thresholds, not tuned
+
+§8.1 step 4 also wants walking (0.9 Hz, small amplitude) excluded from counting. The peak
+detector's own threshold is *relative* (`k * RMS`), so it self-normalizes to any signal's own
+amplitude and would happily count small-amplitude walking on its own terms. Added a second,
+*absolute* amplitude floor (torso-length-normalized units) in `JumpRopeAnalyzer` (cycle amplitude)
+and `CrossCorrelationTechniqueClassifier` (per-ankle activity) specifically to catch this case.
+Values (`0.02`, `0.03`) are placeholders pending real-trace tuning - named constants with
+rationale, per §14, so they're easy to find and re-tune later.
+
+### `CrossCorrelationTechniqueClassifier`'s lag search is bounded by its own cadence estimate
+
+First pass used a fixed `maxLagMs` for the cross-correlation search. That reproduced the exact
+aliasing bug documented in M2's `NormalizedCrossCorrelator` entry: a bound wide enough to reach a
+slow jumper's half period is also wide enough to reach a fast jumper's *full* period, which ties
+with lag 0 and can misclassify `BOTH_FEET` as `ALTERNATING` (caught by
+`CrossCorrelationTechniqueClassifierTest` before this shipped). Fixed by having the classifier
+run its own internal `AutocorrelationCadenceEstimator` on the left ankle and bound the search to
+`0.7 *` the estimated period - comfortably past the half period the search exists to find, safely
+short of the full period that would alias with it.
+
+### `:capture`'s `TraceFrameSource` implements a new `PoseFrameSource`, not `FrameSource`
+
+§6 lists `TraceFrameSource` as one of three `FrameSource` implementations, but also says it
+"отдаёт уже готовые PoseFrame (минуя детектор)" - a recorded trace has no image bytes, only the
+landmarks a detector already produced, so it cannot honestly return `Flow<FrameImage>`. Added a
+sibling `PoseFrameSource` interface (`fun poseFrames(): Flow<PoseFrame>`) for it. `CameraFrameSource`/
+`VideoFileFrameSource` (M4/M6, in `:app`) still implement `FrameSource` as specified.
+
+### Golden files are captured `ReplayPipeline` output, not independently hand-derived
+
+Each `testdata/traces/*.expected.json` is the result of actually running `:tools:replay`'s
+pipeline over that trace once (`GenerateFixturesTest`, disabled by default - see its KDoc) and
+saving the output, not a value computed by an independent formula. An earlier attempt derived
+expected rep timestamps analytically (true sine-peak schedule minus RMS-window warmup minus the
+gate's one sacrificed peak) and got close but not exact - filter settling transients and small
+resampling-boundary effects shift the real detected count by a cycle or two in ways that are
+impractical to hand-predict. Before locking in each golden, `precision`/`mean_offset_ms` from a
+real `./gradlew :tools:replay:run` were checked by hand (all three current traces: `precision =
+1.0`, `mean_offset_ms ≈ 0` on the clean traces) to confirm every detected rep is a genuine,
+well-timed match and not a stored bug - only then is the run's output trustworthy as a *regression*
+baseline. This is why `:tools:replay`'s corpus gate (`MAE ≤ 2`, `F1 ≥ 0.95`) currently reads
+`MAE = 0`, `microF1 = 1.0`: it's confirming determinism against a checked-in-after-verification
+snapshot, not independent ground truth.
+
+While deriving that first analytical attempt, found and fixed a real bug in the generator itself:
+`SyntheticTraceGenerator` builds `HIP_Y` as `baseline - amplitude * sin(phase)` (image-space `y`
+grows downward, so the jump apex is the *smallest* `y`, at `phase = 90°`), but the peak detector
+looks for the filtered signal's *maximum*, which for a negated sine falls at `phase = 270°` -
+three quarters through the cycle, not one quarter. The generator's ground-truth peak schedule
+now uses `3 * period / 4`.
+
+### CSV output formats floats with `Locale.ROOT`
+
+`TraceMetrics`/`Main` originally used `"%.4f".format(x)`, which uses the JVM's default locale -
+on a machine whose locale renders decimals with a comma, this silently produced extra commas
+inside CSV fields (`0,9691` where `0.9691` was intended), corrupting the column count. Every
+numeric-to-string conversion that feeds the CSV now goes through `String.format(Locale.ROOT, ...)`.
+
+### `PoseFrame.quality` and `AnalyzerEvent.QualityIssue` aren't wired to anything yet
+
+`SignalFrame` (and everything downstream of `SignalExtractor`) has no `quality` field at all, so
+nothing in the M3 pipeline can react to a low-confidence frame the way §11's UI eventually needs
+to ("мало света", "не видно стоп"). `ReplayRobustnessTest`'s low-quality test only confirms the
+pipeline doesn't crash on it, not that it produces a `QualityIssue`. Wiring this up needs a home
+(most likely `SessionAggregator` in `:data`/`:feature:workout`, since it's about UI feedback more
+than counting logic) and is deferred to M4/M5.
