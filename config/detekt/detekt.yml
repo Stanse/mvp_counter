@@ -1,0 +1,33 @@
+# Project-specific overrides on top of detekt's default ruleset (buildUponDefaultConfig = true).
+# Thresholds here are intentionally permissive during early scaffolding (M1) and are expected
+# to tighten as the DSP/analyzer modules fill in — see docs/DECISIONS.md.
+
+style:
+  MagicNumber:
+    active: true
+    # Signal/threshold/window constants are required by REPCOUNTER_ANDROID.md §14 to live in
+    # named constants, which this rule already pushes toward; ignore test files where synthetic
+    # fixtures legitimately use literal sample counts.
+    excludes: ["**/test/**", "**/androidTest/**"]
+  MaxLineLength:
+    active: true
+    maxLineLength: 120
+
+complexity:
+  LongMethod:
+    active: true
+    threshold: 60
+  LongParameterList:
+    active: true
+    functionThreshold: 7
+    constructorThreshold: 8
+
+naming:
+  active: true
+  FunctionNaming:
+    active: true
+    # Compose convention is PascalCase for @Composable functions.
+    ignoreAnnotated: ["Composable"]
+
+comments:
+  active: false

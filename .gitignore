@@ -1,0 +1,16 @@
+*.iml
+.gradle/
+.gradle-bootstrap/
+build/
+.idea/
+.DS_Store
+local.properties
+captures/
+.externalNativeBuild/
+.cxx/
+*.hprof
+.kotlin/
+
+# Pose/TFLite models are fetched by scripts/fetch_models.sh, not committed.
+app/src/main/assets/models/*.task
+app/src/main/assets/models/*.tflite
