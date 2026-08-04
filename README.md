@@ -3,9 +3,12 @@
 Offline, on-device camera rep counter (Android). Full requirements: `REPCOUNTER_ANDROID.md`.
 Architecture: `docs/ARCHITECTURE.md`. Non-obvious decisions: `docs/DECISIONS.md`.
 
-Status: **M1 - project skeleton.** Module graph, version catalog, `:core:model` and `:core:dsp`
-types, detekt/ktlint, and a launchable-but-empty `:app` are in place. No pose detection, signal
-processing, or exercise counting logic yet - that's M2 onward.
+Status: **M2 - DSP core.** `:core:dsp` now has real, tested implementations: `LinearResampler`,
+`ButterworthBandpassFilter`, `OneEuroFilter`, `HysteresisPeakDetector`,
+`AutocorrelationCadenceEstimator`, `NormalizedCrossCorrelator`. All Level-1 tests from spec §10
+that target these components pass on synthetic (seeded, deterministic) signals - no camera, pose
+model, or Android dependency anywhere in this module. No signal extraction from real poses or
+exercise counting logic yet - that's M3.
 
 ## Requirements
 
@@ -28,8 +31,14 @@ model file, emulator, or network access at build time.
 
 ```
 ./gradlew test                     # all JVM unit tests
-./gradlew :core:model:test         # single module
+./gradlew :core:dsp:test           # single module
 ```
+
+Level 1 (this milestone): synthetic-signal unit tests in `:core:dsp` - known-frequency sines,
+optionally with seeded white noise and dropped samples, checked against ground truth. See
+`core/dsp/src/test/kotlin/dev/repcounter/core/dsp/synthetic/SyntheticSignals.kt` for the
+generator and `docs/DECISIONS.md`'s M2 section for tuning notes (default peak-detector
+thresholds, cross-correlation lag sign convention).
 
 Levels 2/3 from the spec (replay corpus, instrumented video tests) land in M3/M6 respectively.
 

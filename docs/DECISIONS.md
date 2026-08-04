@@ -142,3 +142,62 @@ a detekt patch release before Gradle 10.
 `org.gradle.configuration-cache=true` in `gradle.properties`. The only friction it caused (the
 module-boundary guard task) has a documented fix above; keeping it on since Gradle is moving
 toward requiring it eventually and it's a meaningful CI speedup.
+
+## M2 — DSP core and synthetic tests
+
+### Butterworth bandpass built as a highpass+lowpass cascade, not a single bandpass biquad
+
+§7 asks for "Butterworth bandpass 0.7-6 Hz". A textbook single bandpass biquad (RBJ cookpage
+constant-skirt-gain form) exists, but for a wide, multi-octave band like this one, cascading a
+2nd-order Butterworth highpass (cutoff = `lowHz`) with a 2nd-order Butterworth lowpass
+(cutoff = `highHz`) is the simpler, more standard construction and lets each section be reasoned
+about (and tested) independently. `ButterworthDesign`/`Biquad` in `:core:dsp` implement the RBJ
+audio-EQ-cookbook formulas directly rather than pulling in a DSP library, since the app has no
+network access to fetch one transitively-verified and the formulas are ~15 lines.
+
+### `PeakDetector`/`CadenceEstimator` know nothing about jump-rope-specific refractory tuning
+
+Spec §8.1 step 3 says the refractory period is `0.6 / f0` (from the cadence estimate). `:core:dsp`
+is domain-agnostic (see `TimedSample`'s KDoc), so `HysteresisPeakDetector` takes a plain
+`minRefractoryMs: Long` instead of a `CadenceEstimator` reference - wiring "refractory derived
+from cadence" is `:analysis:jumprope`'s job (M3), not this layer's. Same reasoning for
+`AutocorrelationCadenceEstimator`'s `minHz`/`maxHz` search bounds: generic constructor
+parameters here, exercise-specific defaults get chosen by the caller in M3.
+
+### `HysteresisPeakDetector` defaults: `k=1.0`, hysteresis ratio `0.3`, not `k=1.5`
+
+A first pass used `k=1.5`, which is mathematically unreachable for a pure sine: peak amplitude is
+only `sqrt(2) * RMS ≈ 1.414 * RMS`, so `1.5 * RMS` never triggers. Settled on `k=1.0` /
+`lowThreshold = 0.3 * highThreshold` - low enough to trigger reliably before the peak, low enough
+on the way down to close the cycle near the zero crossing, high enough above typical
+sensor/synthetic noise floors to avoid double-triggering. Real jump-rope-signal tuning is M3 work
+against real/synthetic traces, same as the refractory period above.
+
+### `:core:dsp`'s "synthetic signal generator" lives in `src/test`, not `src/main`
+
+§13's M2 bullet ("генератор синтетических сигналов") is satisfied by
+`core/dsp/src/test/kotlin/.../synthetic/SyntheticSignals.kt` (seeded sine/noise/drop helpers),
+used only by `:core:dsp`'s own Level-1 tests. This is deliberately not shared via
+`java-test-fixtures` yet - M3's trace-and-golden-file generator (§9) is a different, higher-level
+concept (whole `PoseFrame` sequences with technique segments, not scalar signals) that belongs to
+`:tools:replay`'s test infra when that's built, not a reuse of this one.
+
+### Level-1 test list from §10 is split across M2 and M3, not all delivered now
+
+§10 groups "FSM `ThresholdAnalyzer`: дребезг" and "Гейт активности" under Level 1, but both
+target components that don't exist until M3 (`:analysis:strength`, `:analysis:jumprope`'s
+activity gate). M2 delivers the Level-1 tests for the components M2 actually builds: `Resampler`,
+the two `StreamingFilter`s, `PeakDetector`, `CadenceEstimator`, `CrossCorrelator`. The remaining
+Level-1 tests land in M3 alongside the analyzers they test.
+
+### Cross-correlation lag sign convention, and its inherent half-period ambiguity
+
+`NormalizedCrossCorrelator.correlate(a, b, ...)`: positive `lagMs` means `b` is delayed relative
+to `a` (`b[i+lag]` paired with `a[i]`, best match when `b(t) = a(t - lag)`). Worth recording
+because it's easy to get backwards and there's nothing in the type system to catch a sign flip.
+
+Also: for a technique-classification use (`ANKLE_Y_L` vs `ANKLE_Y_R`, spec §8.1 step 5), a shift
+of exactly half the signal's period is mathematically indistinguishable from a shift of *minus*
+half the period - both describe the same alternating relationship. `NormalizedCrossCorrelatorTest`
+asserts on `abs(lagMs)` for that case rather than a signed value; `TechniqueClassifier` in M3
+should do the same (classify `ALTERNATING` on `|lag| ≈ T/2`, not a specific sign).

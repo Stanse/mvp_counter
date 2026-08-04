@@ -29,8 +29,10 @@ plain-JVM-testable without a camera, a model, or an emulator.
 ```
 :core:model   [pure Kotlin] PoseFrame, Landmark, FrameImage, LandmarkSchema, SignalFrame,
                              SignalId, AnalyzerEvent, QualityKind - depends on nothing in-repo
-:core:dsp     [pure Kotlin] Resampler, StreamingFilter, PeakDetector, CadenceEstimator,
-                             CrossCorrelator, FloatRingBuffer - depends on nothing in-repo
+:core:dsp     [pure Kotlin] LinearResampler, ButterworthBandpassFilter, OneEuroFilter,
+                             HysteresisPeakDetector, AutocorrelationCadenceEstimator,
+                             NormalizedCrossCorrelator, FloatRingBuffer (M2, implemented) -
+                             depends on nothing in-repo
 
 :pose:api        [pure Kotlin] PoseDetector, FrameImage-consuming contract -> :core:model
 :pose:mediapipe  [Android]     MediaPipe Tasks Vision impl -> :pose:api, :core:model
